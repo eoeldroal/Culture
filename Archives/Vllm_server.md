@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=4 vllm serve NCSOFT/VARCO-VISION-2.0-14B --served-model-name VARCO-VISION-2.0-14B --port 8005 --trust-remote-code --allowed-local-media-path
