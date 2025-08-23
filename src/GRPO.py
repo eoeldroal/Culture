@@ -1,5 +1,5 @@
-# CUDA_VISIBLE_DEVICES=0,1,2,3,4,5
-# accelerate launch --config_file accelerate_ds_zero3.yaml GRPO.py --main_process_port 8123
+# CUDA_VISIBLE_DEVICES=0,1 trl vllm-serve --model NCSOFT/VARCO-VISION-2.0-14B --dtype bfloat16 --gpu-memory-utilization 0.85 --port 8005 --data_parallel_size 2 --enable_prefix_caching true
+# CUDA_VISIBLE_DEVICES=2,3,4,5,6,7 accelerate launch --config_file accelerate_ds_zero3_grpo.yaml GRPO.py --main_process_port 8123
 import os
 import torch
 import wandb
@@ -14,7 +14,7 @@ from latex2sympy2_extended import NormalizationConfig
 from typing import Optional
 
 MODEL_ID = "NCSOFT/VARCO-VISION-2.0-14B"
-DATASET = "HuggingFaceH4/llava-instruct-mix-vsft"
+DATASET = "lmms-lab/multimodal-open-r1-8k-verified"
 OUTPUT_DIR = "runs/varco-14b-grpo"
 
 if int(os.environ.get("LOCAL_RANK", 0)) == 0:
@@ -27,12 +27,12 @@ if int(os.environ.get("LOCAL_RANK", 0)) == 0:
             "dataset": DATASET,
             "learning_rate": 6e-6,
             "batch_size": 1,
-            "gradient_accumulation_steps": 8,
+            "gradient_accumulation_steps": 16,
         }
     )
     
-dataset_id = "lmms-lab/multimodal-open-r1-8k-verified"
-dataset = load_dataset(dataset_id, split="train[:5%]")
+# dataset = load_dataset(DATASET, split="train[:5%]")
+dataset = load_dataset(DATASET, split="train[:60%]")
 
 split_dataset = dataset.train_test_split(test_size=0.2, seed=42)
 
@@ -84,6 +84,10 @@ train_dataset = train_dataset.map(make_conversation)
 
 train_dataset = train_dataset.remove_columns(["problem", "original_question", "original_answer"])
 
+test_dataset = test_dataset.map(make_conversation)
+
+test_dataset = test_dataset.remove_columns(["problem", "original_question", "original_answer"])
+
 model = LlavaOnevisionForConditionalGeneration.from_pretrained(
     MODEL_ID,
     torch_dtype=torch.bfloat16,
@@ -98,7 +102,7 @@ def format_reward(completions, **kwargs):
     rewards = [1.0 if match else 0.0 for match in matches]
     return rewards
 
-def accuracy_reward(completions: list[list[dict[str, str]]], solution: list[str], **kwargs) -> list[Optional[float]]:
+def accuracy_reward(completions, solution, **kwargs) :
     """Reward function that checks if the completion matches the ground truth.
     - If both gold and prediction are parseable → use math verification.
     - If not parseable → compare as normalized text.
@@ -144,38 +148,64 @@ def accuracy_reward(completions: list[list[dict[str, str]]], solution: list[str]
     return rewards
 
 training_args = GRPOConfig(
+    use_liger_loss=True,
+    #! 메모리 오류 원인 예측 3. linger_loss 써보기. 
+    mask_truncated_completions=True,
+    
     output_dir=OUTPUT_DIR,
-    bf16=True, fp16=False,
-    learning_rate=6e-6, weight_decay=0.1,
+    bf16=True,
+    learning_rate=6e-6, 
+    weight_decay=0.1,
     
     remove_unused_columns=False,  # to access the solution column in accuracy_reward
     num_train_epochs=1,
-
-    # Parameters that control the data preprocessing
-    generation_batch_size=8,
-    per_device_train_batch_size=1,
-    max_completion_length=1024,  # default: 256
-    num_generations=4,  # default: 8
-    max_prompt_length=8192,
-    torch_empty_cache_steps=8,
-    gradient_accumulation_steps=16,
-    # gradient_checkpointing=True,
-    # gradient_checkpointing_kwargs = {"use_reentrant": False},
-    # Qwen 3 모델의 KV 캐시와 충돌함.
     
-    logging_steps=4,
+    # Parameters that control the data preprocessing
+    per_device_train_batch_size=1,
+    max_completion_length=2048,
+    num_generations=4,
+    max_prompt_length=8192,
+    # 4096으로 하면 오류가 터진다. 
+    torch_empty_cache_steps=1,
+    # 최대한 캐시를 자주 정리하도록. 
+    gradient_accumulation_steps=128,
+    
+    gradient_checkpointing=True,
+    gradient_checkpointing_kwargs = {"use_reentrant": False},
+    
+    # Qwen 3 모델의 KV 캐시와 충돌함.
+    # 현재 메모리 병목의 원인이 Activations 때문인 것 같고, 따라서 gradient checkpointing을 활성화하는 것은 불가피한 것 같다. 
+    # "Caching is incompatible with gradient checkpointing in Qwen3DecoderLayer. Setting `past_key_value=None`." 이러한 오류가 계속 뜬다. 
+    # 따라서 KV 캐시를 사용할 수 밖에 없는 지금 상황에 이러한 Gradient checkpointing은 사용하기가 어려울 것 같다. 
+    
+    #! 메모리 오류 원인 예측 2. vllm에서 생성을 전담하므로, KV 캐시 기능을 꺼도 무방하다. 따라서 Gradient checkpointing을 써도 되지 않나?
+    # -- 맞아요—GRPO에서 “생성”을 vLLM 서버가 전담하고, 학습 쪽(로그프롭·엔트로피 계산 등)만 HF 모델로 돌린다면, 훈련용 HF 모델의 use_cache(KV 캐시)는 꺼두는 게 정석입니다.
+    # -- KV 캐시는 ‘증분 생성(incremental decoding)’ 가속용입니다. 한 토큰씩 생성할 때 이전 스텝의 K/V를 재사용하려고 보존하는 버퍼라서, 병렬로 정답 시퀀스를 넣는 훈련/로그프롭 계산(teacher forcing) 에서는 재사용할 “다음 스텝”이 없어 효과가 없습니다. 그래서 훈련에선 끄라고 안내합니다.
+    # 즉, KV 캐시는 SFT, GRPO등 단계에서 모두 꺼도 된다! 라는 뜻이다. 
+    
+    use_vllm=True, 
+    vllm_mode='server',
+    vllm_server_port=8005,
+    
+    logging_steps=1,
     save_strategy="steps",
     save_steps = 16,
     eval_strategy = "steps",
     eval_steps = 16,
     
     # Parameters related to reporting and saving
-    optim="adamw_8bit",
+    optim="adamw_torch",
+    #! 메모리 오류 원인 예측 1. optimizer가 호환이 안 되나?
+    # bitsandbytes와 deepspeed가 호환이 안 되어서 zero-3가 제대로 적용이 안 된 것일수도.
+    # 따라서 adamw_8bit 대신 adamw_torch를 사용함
+    # try 1. 
     report_to="wandb",
     run_name="varco-vision-grpo-experiment",  # 실행 이름
     logging_dir="./logs",  # 로그 디렉토리
     
 )
+#! 메모리 오류 원인 예측 2. vllm에서 생성을 전담하므로, KV 캐시 기능을 꺼도 무방하다. 따라서 Gradient checkpointing을 써도 되지 않나?
+model.config.use_cache = False
 
 trainer = GRPOTrainer(
     model=model,

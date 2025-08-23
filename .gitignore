@@ -50,9 +50,6 @@ Thumbs.db
 # Logs
 *.log
 
-# Runs
-/runs
-
 # Cache
 .cache/
 
