@@ -27,7 +27,7 @@ if int(os.environ.get("LOCAL_RANK", 0)) == 0:
             "dataset": DATASET,
             "learning_rate": 6e-6,
             "batch_size": 1,
-            "gradient_accumulation_steps": 16,
+            "gradient_accumulation_steps":128,
         }
     )
     
@@ -70,6 +70,7 @@ def make_conversation(example):
     ]
     
     # 이미지 변환
+    # GRPO는 여기서처럼 이미지를 변환한다.
     img = example["image"]
     rgb_img = img.convert('RGB')
     

@@ -1,0 +1,27 @@
+compute_environment: LOCAL_MACHINE
+debug: false
+deepspeed_config:
+  gradient_accumulation_steps: 8
+  offload_optimizer_device: none
+  offload_param_device: none
+  # cpu offload를 할 경우 훈련 시간이 매우 길어지는 문제가 발생한다. 
+  # 따라서 cpu offload를 하지 않고, optimizer를 8bit 짜리를 사용하는 것으로 문제를 해결하였다.
+  zero3_init_flag: true
+  zero3_save_16bit_model: true
+  zero_stage: 3
+distributed_type: DEEPSPEED
+downcast_bf16: 'no'
+enable_cpu_affinity: false
+machine_rank: 0
+main_training_function: main
+# 이 설정은 가급적 main() 함수로 학습 로직을 감싸고, if __name__ == "__main__": main() 형태로 실행하도록 요구합니다.
+# 그렇지 않으면 Accelerate가 멀티프로세스로 스폰하는 시점에 import/실행 타이밍이나 함수 진입점에서 문제가 나거나, config에 맞지 않는다고 에러를 뱉을 수 있습니다.
+mixed_precision: bf16
+num_machines: 1
+num_processes: 4
+rdzv_backend: static
+same_network: true
+tpu_env: []
+tpu_use_cluster: false
+tpu_use_sudo: false
+use_cpu: false

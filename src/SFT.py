@@ -1,5 +1,5 @@
 # CUDA_VISIBLE_DEVICES=0,1,2,3
-# accelerate launch --config_file accelerate_ds_zero3.yaml SFT.py --main_process_port 8123
+# accelerate launch --config_file accelerate_ds_zero3_sft.yaml SFT.py --main_process_port 8123
 import os
 import torch
 import wandb
